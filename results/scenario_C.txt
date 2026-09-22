@@ -1,0 +1,23 @@
+บันทึกผลการทดลอง Scenario C — Request-Parallel (2 workers)
+วันที่วัด: 22 ก.ย. 2026 เวลา ~22:40 (หลัง worker ทั้งสองยืนยันเสถียร)
+เงื่อนไข: 8 requests, max_tokens 128, seed 42, temperature 0, prompt เดียวกันทุกเซ็ต
+คำสั่ง: python3 client.py --master 10.0.0.1 --requests 8 --max-tokens 128 \
+        --prompt "Write a Python function that checks if a number is prime."
+หมายเหตุ: rerun รอบ ~23:07 ไม่นำมาใช้ เพราะวิ่งทับกับการ compile (build-rpc)
+ที่กิน CPU ทั้ง 4 คอร์ ทำให้ tok/s ร่วงเหลือ ~2.2 — บันทึกไว้เป็นบทเรียนว่า
+workload ภายนอกกระทบ inference โดยตรง
+
+  job   0 on rpi4b-1       8.48897399252422 tok/s  (15456.6 ms)
+  job   1 on rpi4b-2       8.027501334651108 tok/s  (17182.1 ms)
+  job   2 on rpi4b-1       8.48467170567088 tok/s  (15090.2 ms)
+  job   3 on rpi4b-2       8.232422416873277 tok/s  (15551.9 ms)
+  job   4 on rpi4b-1       8.474217194186688 tok/s  (15105.7 ms)
+  job   5 on rpi4b-2       8.200440990014059 tok/s  (15610.8 ms)
+  job   6 on rpi4b-1       8.462208211233774 tok/s  (15126.7 ms)
+  job   7 on rpi4b-2       8.011328396841089 tok/s  (15976.4 ms)
+
+==== summary ====
+jobs ok/total : 8/8
+wall time     : 64.51s
+tok/s per job : mean 8.30, min 8.01, max 8.49
+aggregate     : 15.87 tok/s (total tokens generated / wall time)
