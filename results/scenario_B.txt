@@ -1,0 +1,13 @@
+Warning: Permanently added '192.168.1.223' (ED25519) to the list of known hosts.
+submitted 4 job(s); waiting...
+
+  job  24 on rpi4b-1       7.668650532470032 tok/s  (17581.3 ms)
+  job  25 on rpi4b-1       7.494488600292722 tok/s  (17110.8 ms)
+  job  26 on rpi4b-1       7.654808404063461 tok/s  (16725.0 ms)
+  job  27 on rpi4b-1       7.643563884485648 tok/s  (16745.6 ms)
+
+==== summary ====
+jobs ok/total : 4/4
+wall time     : 68.23s
+tok/s per job : mean 7.62, min 7.49, max 7.67
+aggregate     : 7.5 tok/s (total tokens generated / wall time)
