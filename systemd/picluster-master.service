@@ -1,0 +1,14 @@
+[Unit]
+Description=PiCluster master
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=rpi4b-1
+WorkingDirectory=/home/rpi4b-1/pi-cluster
+ExecStart=/usr/bin/python3 /home/rpi4b-1/pi-cluster/master.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -105,6 +105,26 @@ python3 webui.py        # เปิดเบราว์เซอร์: http://
 - master เปิด read-only status API ที่พอร์ต 5557 (`GET /api/cluster`,
   `POST /api/model`)
 
+### Auto-start หลังรีบูต (systemd)
+
+ติดตั้งครั้งเดียว แล้วทุกอย่างฟื้นเองหลังรีบูต (worker ~3 วิหลังบูต):
+
+```bash
+# บน rpi4b-1
+sudo cp ~/pi-cluster/systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now picluster-master picluster-worker@rpi4b-1 picluster-webui
+
+# บน rpi4b-2
+sudo cp ~/pi-cluster/systemd/picluster-worker@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now picluster-worker@rpi4b-2
+```
+
+พร้อมกันนี้ worker ยังเปิด TCP keepalive + ตรวจ heartbeat failure
+เพื่อกัน connection แบบ half-open หลัง link flap (worker จะ re-register
+ใหม่เองแทนที่จะนั่ง block กับ connection ที่ตายแล้ว)
+
 ### Telegram bot (แจ้งสถานะ Pi)
 
 ```bash

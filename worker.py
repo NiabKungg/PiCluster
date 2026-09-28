@@ -276,19 +276,41 @@ class MockRunner:
         pass
 
 
-def heartbeat_loop(master, name, stop, runner):
+def keepalive(sock):
+    """Detect half-open connections (e.g. link flap that never delivered
+    FIN/RST) within ~9s instead of blocking in recv() forever."""
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
+
+def heartbeat_loop(master, name, stop, runner, state):
     """Keeps a dedicated connection open and pings the master every 2s,
-    attaching fresh machine telemetry to every beat."""
+    attaching fresh machine telemetry to every beat. If two consecutive
+    beats fail, the control socket is forcibly reset so the main loop
+    reconnects (recovers from half-open TCP after link flaps)."""
+    failures = 0
     while not stop.is_set():
         try:
             s = socket.create_connection((master, HEARTBEAT_PORT), timeout=5)
+            failures = 0
             while not stop.is_set():
                 payload = {"type": "HEARTBEAT", "name": name}
                 payload.update(runner.telemetry())
                 send_json(s, payload)
+                failures = 0
                 stop.wait(HEARTBEAT_INTERVAL)
             s.close()
         except OSError:
+            failures += 1
+            if failures >= 2:
+                c = state.get("conn")
+                if c is not None:
+                    try:
+                        c.shutdown(socket.SHUT_RDWR)  # wake the main recv
+                    except OSError:
+                        pass
             stop.wait(1.0)  # master briefly unreachable; retry
 
 
@@ -325,8 +347,9 @@ def main():
     runner.start()
 
     stop = threading.Event()
+    state = {"conn": None}
     threading.Thread(target=heartbeat_loop,
-                     args=(args.master, args.name, stop, runner),
+                     args=(args.master, args.name, stop, runner, state),
                      daemon=True).start()
 
     try:
@@ -339,7 +362,9 @@ def main():
                 except OSError:
                     log("waiting for master...")
                     time.sleep(1.0)
+            keepalive(conn)
             conn.settimeout(None)  # job waits can be long; block until they arrive
+            state["conn"] = conn
             try:
                 send_json(conn, {"type": "REGISTER", "name": args.name,
                                  "mode": runner.mode, "cpu": os.cpu_count(),
@@ -375,6 +400,7 @@ def main():
                 log(f"connection lost ({exc}); reconnecting in 3s")
                 time.sleep(3.0)
             finally:
+                state["conn"] = None
                 try:
                     conn.close()
                 except OSError:
