@@ -167,6 +167,9 @@ python3 tgbot.py   # แล้วทัก /start ที่บอท — จะ�
    ไฟล์สมบูรณ์แล้วผ่านสายตรงแทน (491 MB ใน ~16 วิ)
 6. **worker ตายเป๊ะทุก 5 วินาที** → socket จาก `create_connection(timeout=5)`
    ไม่ได้เคลียร์ timeout ก่อนเข้าลูปรับ job — ต้อง `settimeout(None)`
+7. **รีบูตติดกันเร็ว ๆ แล้ว node ที่บูตจาก USB หายจากเครือข่าย** → USB device
+   ไม่ re-enumerate ทัน แก้ด้วย: เว้นระยะปลั๊ก ≥30 วิ + ตั้ง
+   `PROGRAM_USB_BOOT_TIMEOUT=1` ใน EEPROM (`rpi-eeprom-config`)
 
 ## 📁 โครงสร้าง
 
