@@ -112,11 +112,16 @@ class PiMonitor:
                         notify(online_message(name, ip, wifi))
             else:
                 st["fails"] += 1
-                if st["online"] and st["fails"] >= 2:
+                if st["online"] is not False and st["fails"] >= 2:
+                    first_seen = st["online"] is None
                     st["online"] = False
-                    notify(f"🔴 {name} offline ไม่ตอบแล้ว "
-                           f"(IP {ip}, เห็นครั้งสุดท้าย "
-                           f"{st['last_seen'] or '?'})")
+                    if first_seen:
+                        notify(f"🟠 {name} offline ตั้งแต่เริ่มเฝ้าดู "
+                               f"(IP {ip})")
+                    else:
+                        notify(f"🔴 {name} offline ไม่ตอบแล้ว "
+                               f"(IP {ip}, เห็นครั้งสุดท้าย "
+                               f"{st['last_seen'] or '?'})")
 
     def snapshot(self):
         rows = []

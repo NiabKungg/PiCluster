@@ -32,7 +32,8 @@ client ◀──DONE──── master ◀─JOB_RESULT─ worker B ──▶ l
 
 - **Protocol**: 4-byte length prefix + JSON ผ่าน TCP (`common.py`)
 - **Fault tolerance**: ไม่ได้รับ heartbeat เกิน 8 วิ → ถือว่า worker ตาย,
-  job ที่ค้างถูกส่งใหม่ให้ worker อื่นอัตโนมัติ (สูงสุด 3 ครั้ง)
+  job ที่ค้าง**หรือ job ที่รายงาน error** ถูกส่งใหม่ให้ worker อื่นอัตโนมัติ
+  (สูงสุด 3 ครั้ง = at-least-once); worker ที่หลุดจะกลับมา register ใหม่เอง
 - **เครือข่าย**: Pis ต่อสาย LAN ตรงถึงกัน (subnet 10.0.0.0/24, static IP) —
   traffic ของคลัสเตอร์วิ่งสายจุดต่อจุด, ใช้ WiFi สำหรับ SSH/ควบคุมงาน
 

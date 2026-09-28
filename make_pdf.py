@@ -196,6 +196,14 @@ def story():
                "HEARTBEAT master มี 4 ส่วนทำงานพร้อมกันด้วย thread: ตัวรับ"
                "การเชื่อมต่อ, dispatcher (จับคู่ job กับ worker ที่ว่าง), "
                "heartbeat listener และ failure monitor"))
+    s.append(P("ระบบรับประกันการส่งงานแบบ at-least-once: job ที่ worker "
+               "ขาดการเชื่อมต่อกลางทาง หรือ job ที่ worker รายงานว่าล้มเหลว "
+               "จะถูกนำกลับเข้าคิวใหม่อัตโนมัติ (สูงสุด 3 ครั้ง) และ worker "
+               "ที่หลุดการเชื่อมต่อจะพยายามกลับมาลงทะเบียนกับ master ใหม่"
+               "ด้วยตัวเอง ข้อแลกเปลี่ยนคือในทางทฤษฎี job หนึ่งอาจถูกประมวลผล"
+               "ซ้ำสองรอบในกรณีที่ node ถูกตัดสินว่าล้มทั้งที่ยังทำงานค้าง "
+               "ซึ่งยอมรับได้สำหรับงาน inference เพราะผลลัพธ์คาดเดาได้ "
+               "(temperature 0 และ seed เดียวกันให้ผลเดียวกัน)"))
     s.append(H2("4.2 วิธีวัดผลที่ควบคุมตัวแปร"))
     s.append(P("ใช้ llama-server ต่อ node, วัดด้วย client ตัวเดียวกันทุกเซ็ตอัป "
                "กำหนด seed 42, temperature 0, max_tokens 128, prompt เดียวกัน "
@@ -226,7 +234,7 @@ def story():
                "ได้ความเร็วใกล้เคียงกันที่ ~8.4 tok/s ซึ่งเป็นความเร็ว "
                "เต็มของเครื่องเดียวกับโมเดลนี้"))
     s.append(H2("5.3 Scenario C — คลัสเตอร์สองเครื่อง"))
-    s.extend(IMG(os.path.join("results", "figs", "fig1_aggregate.png"),
+    s.extend(IMG(os.path.join(FIGS, "fig1_aggregate.png"),
                  "ภาพที่ 1: Aggregate throughput — 1 worker (8.41) เทียบ "
                  "2 workers (15.87) เทียบเส้นอุดมคติ 2 เท่า (16.82)"))
     s.append(P("8 jobs ถูกกระจายสลับสองเครื่องอย่างสมมาตร (4:4) ใช้เวลารวม "
@@ -235,12 +243,12 @@ def story():
                "ไม่ลดลงเลย (เฉลี่ย 8.30 เทียบกับ 8.43 ของเครื่องเดียว ต่างกัน "
                "1.5%) แปลว่าผู้ใช้ทุกคนยังได้ความเร็วเต็มเหมือนมีเครื่องส่วนตัว "
                "แต่ระบบรวม serve ได้มากขึ้นเกือบสองเท่า"))
-    s.extend(IMG(os.path.join("results", "figs", "fig2_per_job.png"),
+    s.extend(IMG(os.path.join(FIGS, "fig2_per_job.png"),
                  "ภาพที่ 2: tok/s ราย job ของ scenario A และ C"))
-    s.extend(IMG(os.path.join("results", "figs", "fig3_walltime.png"),
+    s.extend(IMG(os.path.join(FIGS, "fig3_walltime.png"),
                  "ภาพที่ 3: Wall time รวมของ 8 jobs — 121.76s เทียบ 64.51s"))
     s.append(H2("5.4 Scenario B — การแบ่งโมเดลข้ามเครื่อง"))
-    if os.path.isfile(os.path.join("results", "scenario_B.txt")):
+    if os.path.isfile(os.path.join(BASE, "results", "scenario_B.txt")):
         s.append(P("การแบ่งน้ำหนักโมเดลข้ามเครื่องด้วย RPC ทำงานได้จริง (4/4 jobs "
                    "สำเร็จ) แต่ให้ความเร็วเฉลี่ยเพียง 7.62 tok/s ต่อ request "
                    "เทียบกับ 8.43 tok/s ของเครื่องเดียว — ช้าลงราว 10% "
@@ -248,7 +256,7 @@ def story():
                    "ที่ generate ต้องมีการสื่อสารเลเยอร์ข้ามเครือข่าย "
                    "ถ้าเป็นลิงก์ 100 Mbit/s ความต่างจะยิ่งมากกว่านี้มาก "
                    "ดูภาพที่ 4"))
-        s.extend(IMG(os.path.join("results", "figs", "fig4_split.png"),
+        s.extend(IMG(os.path.join(FIGS, "fig4_split.png"),
                      "ภาพที่ 4: เครื่องเดียว (8.43 tok/s) เทียบ การแบ่งโมเดล"
                      "ข้ามเครื่อง (7.62 tok/s)"))
     else:
@@ -305,7 +313,9 @@ def story():
                "2) เพิ่มการกระจายแบบ weighted ตามความเร็วจริงของแต่ละ node<br/>"
                "3) ทดสอบกับโมเดลใหญ่ขึ้น (7B) บน Pi 5 RAM 4GB เพื่อศึกษา"
                "กรณีโมเดลใหญ่เกิน RAM เดี่ยว<br/>"
-               "4) ใช้ cgroups แยก CPU share ระหว่าง inference กับ workload อื่น"))
+               "4) ใช้ cgroups แยก CPU share ระหว่าง inference กับ workload อื่น<br/>"
+               "5) เพิ่มการยืนยันตัวตนให้ master (ข้อจำกัดปัจจุบัน: อุปกรณ์ใด ๆ "
+               "บน LAN สามารถส่ง job หรือปลอมเป็น worker ได้)"))
 
     # ---------- appendix ----------
     s.append(PageBreak())

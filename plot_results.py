@@ -111,7 +111,8 @@ def main():
 
     # ---- fig 4: scenario B (model split) — เมื่อมีข้อมูล -----------------
     if "B" in data and data["B"]["jobs"]:
-        base = data["A"]["jobs"][0]["tok_s"]
+        base = (sum(j["tok_s"] for j in data["A"]["jobs"])
+                / len(data["A"]["jobs"]))
         split = [j["tok_s"] for j in data["B"]["jobs"]]
         mean_split = sum(split) / len(split)
         fig, ax = plt.subplots(figsize=(7, 4.5))

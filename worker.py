@@ -163,40 +163,55 @@ def main():
     threading.Thread(target=heartbeat_loop, args=(args.master, args.name, stop),
                      daemon=True).start()
 
-    conn = None
-    while conn is None:
-        try:
-            conn = socket.create_connection((args.master, MASTER_PORT), timeout=5)
-        except OSError:
-            log("waiting for master...")
-            time.sleep(1.0)
-    conn.settimeout(None)  # job waits can be long; block until they arrive
-    send_json(conn, {"type": "REGISTER", "name": args.name,
-                     "mode": runner.mode, "cpu": os.cpu_count(),
-                     "mem_mb": mem_total_mb()})
-    log(f"registered with master {args.master} as {args.name} ({runner.mode})")
-
     try:
-        while True:
-            msg = recv_json(conn)
-            if msg.get("type") != "JOB":
-                continue
-            log(f"got job {msg['job_id']}")
+        while True:  # reconnect forever: a lost master must not retire this worker
+            conn = None
+            while conn is None:
+                try:
+                    conn = socket.create_connection((args.master, MASTER_PORT),
+                                                    timeout=5)
+                except OSError:
+                    log("waiting for master...")
+                    time.sleep(1.0)
+            conn.settimeout(None)  # job waits can be long; block until they arrive
             try:
-                result = runner.run(msg)
-            except Exception as exc:  # report failure instead of hanging
-                result = {"status": "error", "error": str(exc)}
-            result["type"] = "JOB_RESULT"
-            send_json(conn, result)
-    except (ConnectionError, KeyboardInterrupt):
+                send_json(conn, {"type": "REGISTER", "name": args.name,
+                                 "mode": runner.mode, "cpu": os.cpu_count(),
+                                 "mem_mb": mem_total_mb()})
+            except OSError:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                time.sleep(1.0)
+                continue
+            log(f"registered with master {args.master} as {args.name} "
+                f"({runner.mode})")
+            try:
+                while True:
+                    msg = recv_json(conn)
+                    if msg.get("type") != "JOB":
+                        continue
+                    log(f"got job {msg['job_id']}")
+                    try:
+                        result = runner.run(msg)
+                    except Exception as exc:  # report failure instead of hanging
+                        result = {"status": "error", "error": str(exc)}
+                    result["type"] = "JOB_RESULT"
+                    send_json(conn, result)
+            except (ConnectionError, OSError) as exc:
+                log(f"connection lost ({exc}); reconnecting in 3s")
+                time.sleep(3.0)
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+    except KeyboardInterrupt:
         log("disconnected")
     finally:
         stop.set()
         runner.stop()
-        try:
-            conn.close()
-        except OSError:
-            pass
 
 
 if __name__ == "__main__":

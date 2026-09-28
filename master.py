@@ -119,6 +119,11 @@ class Master:
                     w.free = True
                 if job is None:
                     continue
+                if msg.get("status") != "ok":
+                    # inference failure counts against MAX_ATTEMPTS too
+                    log(f"job {job.id} failed on {w.name}: {msg.get('error')}")
+                    self.requeue(job)
+                    continue
                 msg["job_id"] = job.id
                 msg["worker"] = w.name
                 msg["wall_ms"] = round((time.time() - job.started_at) * 1000, 1)
@@ -239,6 +244,7 @@ class Master:
     def handle_client(self, conn, submit):
         n = max(1, int(submit.get("count", 1)))
         session = ClientSession(conn)
+        conn.settimeout(30)  # never block a worker thread on a stalled client
         session.outstanding = n
         t0 = time.time()
         for _ in range(n):
