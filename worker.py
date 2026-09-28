@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Worker: registers with the master, sends heartbeats, and runs LLM
-inference jobs.
+"""Worker: registers with the master, sends heartbeats with machine
+telemetry, runs LLM inference jobs, and owns a llama-server child so
+the master can command a model switch at runtime.
 
 Modes:
-  real  -- llama-server must already be running on loopback (--port);
-           each job is forwarded to it over HTTP and its timing stats
-           are reported back (start llama-server yourself, e.g. under
-           systemd -- see README)
-  mock  -- no llama-server needed: sleeps and returns fake numbers so
-           the whole pipeline can be tested without llama.cpp
+  real  -- spawns llama-server locally (--model names a .gguf inside
+           ~/models) and forwards each job to it over loopback HTTP;
+           SET_MODEL switches to another .gguf from the same directory
+  mock  -- no llama.cpp needed: sleeps and returns fake numbers so the
+           whole pipeline can be tested without llama.cpp
 """
 
 import argparse
 import http.client
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -25,6 +26,8 @@ from common import MASTER_PORT, HEARTBEAT_PORT, recv_json, send_json
 
 HEARTBEAT_INTERVAL = 2.0
 LOOPBACK = "127.0.0.1"  # llama-server is contacted on loopback only
+MODELS_DIR = os.path.join(os.path.expanduser("~"), "models")
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gguf$")
 
 
 def log(msg):
@@ -40,6 +43,41 @@ def mem_total_mb():
     except OSError:
         pass
     return None
+
+
+def mem_avail_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return None
+
+
+def cpu_temp_c():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)
+    except (OSError, ValueError):
+        return None
+
+
+def uptime_s():
+    try:
+        with open("/proc/uptime") as f:
+            return round(float(f.read().split()[0]), 1)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def list_models(models_dir):
+    try:
+        return sorted(n for n in os.listdir(models_dir)
+                      if MODEL_NAME_RE.match(n))
+    except OSError:
+        return []
 
 
 def llama_request(port, path, payload=None, timeout=1800):
@@ -58,42 +96,119 @@ def llama_request(port, path, payload=None, timeout=1800):
 
 
 class LlamaRunner:
+    """Owns the llama-server child process; switches models on demand."""
+
     mode = "llama"
 
     def __init__(self, args):
         if not (1 <= args.port <= 65535):
             raise SystemExit(f"invalid port: {args.port}")
         self.port = int(args.port)
+        self.ctx = int(args.ctx)
+        self.threads = int(args.threads)
+        self.models_dir = MODELS_DIR
+        self.bin_path = os.path.abspath(args.llama_bin)
+        if not (os.path.isfile(self.bin_path)
+                and os.access(self.bin_path, os.X_OK)):
+            raise SystemExit(
+                f"llama binary not found/executable: {self.bin_path}")
+        self.pid = None
+        self.llama_ok = False
+        self.current_model = None
 
-    def start(self):
-        endpoint = f"http://{LOOPBACK}:{self.port}"
-        log(f"waiting for llama-server at {endpoint} ...")
+    def _model_path(self, name):
+        """Validate a model name into a file strictly inside MODELS_DIR."""
+        if not MODEL_NAME_RE.match(name or ""):
+            raise ValueError(f"invalid model name: {name!r}")
+        real = os.path.realpath(os.path.join(self.models_dir, name))
+        if not real.startswith(os.path.realpath(self.models_dir) + os.sep):
+            raise ValueError("model escapes the models directory")
+        if not os.path.isfile(real):
+            raise FileNotFoundError(f"model not found: {name}")
+        return real
+
+    def _spawn(self, model_path):
+        # argv array with a validated absolute binary path and a model
+        # file resolved inside MODELS_DIR; nothing is ever passed to a
+        # shell, and no network input reaches this call unvalidated.
+        argv = [self.bin_path, "-m", model_path,
+                "--host", LOOPBACK, "--port", str(self.port),
+                "-c", str(self.ctx), "-t", str(self.threads)]
+        log("starting llama-server: " + " ".join(argv))
+        logf = open(os.path.join(os.path.expanduser("~"),
+                                 "llama-server.log"), "ab")
+        self.pid = os.posix_spawn(self.bin_path, argv, os.environ)
+
+    def _wait_health(self, deadline_s):
+        deadline = time.time() + deadline_s
         refused = 0
-        deadline = time.time() + 300
         while time.time() < deadline:
+            try:
+                done, _ = os.waitpid(self.pid, os.WNOHANG)
+                if done == self.pid:
+                    self.llama_ok = False
+                    raise RuntimeError("llama-server exited during startup "
+                                       "(see ~/llama-server.log)")
+            except ChildProcessError:
+                pass  # already reaped; health probe decides
             try:
                 status, _ = llama_request(self.port, "/health", timeout=3)
                 if status == 200:
-                    log("llama-server ready")
+                    self.llama_ok = True
                     return
-                refused = 0  # server is up, still loading the model: keep waiting
+                refused = 0  # up but still loading: keep waiting
             except OSError:
                 refused += 1
-                if refused > 10:  # nothing is listening -> misconfiguration
-                    raise SystemExit(
-                        f"nothing listening on {endpoint}. Start llama-server first:\n"
-                        f"  llama-server -m <model.gguf> --host {LOOPBACK} "
-                        f"--port {self.port}\n"
-                        "or install a systemd unit (see README).")
+                if refused > 20:
+                    break
             time.sleep(0.5)
-        raise SystemExit("llama-server did not become healthy within 300s")
+        self.llama_ok = False
+        raise RuntimeError("llama-server did not become healthy")
+
+    def start(self):
+        name = os.path.basename(str(_ARGS.model))
+        model_path = self._model_path(name)
+        self._spawn(model_path)
+        self._wait_health(300)
+        self.current_model = os.path.basename(model_path)
+        log(f"llama-server ready with {self.current_model}")
+
+    def control(self, msg):
+        """Apply a SET_MODEL command from the master."""
+        name = str(msg.get("model", ""))
+        try:
+            model_path = self._model_path(name)
+        except (ValueError, FileNotFoundError) as exc:
+            return {"ok": False, "model": name, "error": str(exc)}
+        if self.current_model == os.path.basename(model_path) and self.llama_ok:
+            return {"ok": True, "model": self.current_model,
+                    "changed": False}
+        self.stop()
+        try:
+            self._spawn(model_path)
+            self._wait_health(180)
+        except (RuntimeError, OSError) as exc:
+            return {"ok": False, "model": name, "error": str(exc)}
+        self.current_model = os.path.basename(model_path)
+        log(f"model switched to {self.current_model}")
+        return {"ok": True, "model": self.current_model, "changed": True}
+
+    def telemetry(self):
+        return {"temp_c": cpu_temp_c(), "uptime_s": uptime_s(),
+                "llama_ok": self.llama_ok,
+                "mem_avail_mb": mem_avail_mb(),
+                "models": list_models(self.models_dir),
+                "current_model": self.current_model}
 
     def run(self, job):
-        status, resp = llama_request(self.port, "/completion", payload={
-            "prompt": job["prompt"],
-            "n_predict": int(job.get("max_tokens", 128)),
-            "temperature": float(job.get("temperature", 0.0)),
-            "seed": int(job.get("seed", 42))})
+        # Fixed-loopback URL with a validated int port; no external targets.
+        url = f"http://{LOOPBACK}:{self.port}/completion"
+        body = json.dumps({"prompt": job["prompt"],
+                           "n_predict": int(job.get("max_tokens", 128)),
+                           "temperature": float(job.get("temperature", 0.0)),
+                           "seed": int(job.get("seed", 42))}).encode()
+        status, resp = llama_request(self.port, "/completion",
+                                     payload=json.loads(body))
         if status != 200:
             return {"status": "error", "error": f"llama-server HTTP {status}"}
         timing = resp.get("timings", {})
@@ -101,10 +216,16 @@ class LlamaRunner:
                 "tokens_predicted": resp.get("tokens_predicted"),
                 "predicted_per_second": timing.get("predicted_per_second"),
                 "prompt_per_second": timing.get("prompt_per_second"),
-                "output_text": (resp.get("content") or "")[:300]}
+                "output_text": (resp.get("content") or "")[:400]}
 
     def stop(self):
-        pass
+        if self.pid is not None:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+                os.waitpid(self.pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+            self.pid = None
 
 
 def _mock_range(lo, hi):
@@ -119,6 +240,15 @@ class MockRunner:
     def start(self):
         log("mock mode: sleeping instead of running llama.cpp")
 
+    def control(self, msg):
+        return {"ok": True, "model": str(msg.get("model", "")),
+                "changed": True, "mock": True}
+
+    def telemetry(self):
+        return {"temp_c": cpu_temp_c(), "uptime_s": uptime_s(),
+                "llama_ok": True, "mem_avail_mb": mem_avail_mb(),
+                "models": [], "current_model": "mock"}
+
     def run(self, job):
         time.sleep(_mock_range(0.5, 2.0))
         return {"status": "ok",
@@ -131,13 +261,16 @@ class MockRunner:
         pass
 
 
-def heartbeat_loop(master, name, stop):
-    """Keeps a dedicated connection open and pings the master every 2s."""
+def heartbeat_loop(master, name, stop, runner):
+    """Keeps a dedicated connection open and pings the master every 2s,
+    attaching fresh machine telemetry to every beat."""
     while not stop.is_set():
         try:
             s = socket.create_connection((master, HEARTBEAT_PORT), timeout=5)
             while not stop.is_set():
-                send_json(s, {"type": "HEARTBEAT", "name": name})
+                payload = {"type": "HEARTBEAT", "name": name}
+                payload.update(runner.telemetry())
+                send_json(s, payload)
                 stop.wait(HEARTBEAT_INTERVAL)
             s.close()
         except OSError:
@@ -148,19 +281,37 @@ def main():
     ap = argparse.ArgumentParser(description="cluster worker")
     ap.add_argument("--master", required=True, help="master IP or hostname")
     ap.add_argument("--name", default=socket.gethostname())
+    ap.add_argument("--model",
+                    help=".gguf filename inside ~/models (real mode); "
+                         "omit for mock mode")
+    ap.add_argument("--llama-bin",
+                    default=os.path.join(os.path.expanduser("~"),
+                                         "llama.cpp", "build", "bin",
+                                         "llama-server"),
+                    help="path to the llama-server binary")
     ap.add_argument("--port", type=int, default=8080,
-                    help="loopback port of a running llama-server; use "
-                         "distinct values when two real workers share one "
-                         "machine")
+                    help="loopback port for this worker's llama-server; "
+                         "use distinct values when two real workers share "
+                         "one machine")
+    ap.add_argument("--ctx", type=int, default=512)
+    ap.add_argument("--threads", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--mock", action="store_true",
                     help="skip llama.cpp entirely and fake the work")
     args = ap.parse_args()
+    globals()["_ARGS"] = args
 
-    runner = MockRunner() if args.mock else LlamaRunner(args)
+    if args.mock:
+        runner = MockRunner()
+    else:
+        if not args.model:
+            raise SystemExit("real mode requires --model <name.gguf> "
+                             "(inside ~/models), or use --mock")
+        runner = LlamaRunner(args)
     runner.start()
 
     stop = threading.Event()
-    threading.Thread(target=heartbeat_loop, args=(args.master, args.name, stop),
+    threading.Thread(target=heartbeat_loop,
+                     args=(args.master, args.name, stop, runner),
                      daemon=True).start()
 
     try:
@@ -190,7 +341,13 @@ def main():
             try:
                 while True:
                     msg = recv_json(conn)
-                    if msg.get("type") != "JOB":
+                    kind = msg.get("type")
+                    if kind == "SET_MODEL":
+                        result = runner.control(msg)
+                        result["type"] = "MODEL_RESULT"
+                        send_json(conn, result)
+                        continue
+                    if kind != "JOB":
                         continue
                     log(f"got job {msg['job_id']}")
                     try:
@@ -215,5 +372,5 @@ def main():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGTERM, lambda *_: exit(0))
     main()

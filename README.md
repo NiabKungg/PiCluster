@@ -86,6 +86,25 @@ python3 client.py --master 10.0.0.1 --requests 8 --max-tokens 128
 
 ทดสอบ pipeline โดยไม่ต้องมี llama.cpp: `python3 worker.py --master <ip> --name w1 --mock`
 
+### Web Console (แชท + สถานะ + สลับโมเดล บน rpi4b-1)
+
+```bash
+# บน rpi4b-1 — worker ต้องเป็นโหมด managed (worker spawn llama-server เอง)
+python3 worker.py --master 10.0.0.1 --name rpi4b-1 --model <ชื่อไฟล์.gguf>
+python3 webui.py        # เปิดเบราว์เซอร์: http://192.168.1.223:8000
+```
+
+- **แชทผ่านคลัสเตอร์**: ทุกข้อความถูกส่งเข้า master แล้วกระจายให้ worker —
+  bubble คำตอบบอกเสมอว่า **Pi ตัวไหนประมวลผล, กี่ tok/s, กี่วินาที**
+- **สถานะโหนด**: อุณหภูมิ / RAM ว่าง / uptime / สุขภาพ llama-server /
+  โมเดลปัจจุบัน ของทั้งสองเครื่อง — มาจาก heartbeat ของ worker เอง
+  (โปรโตคอลเดียวกัน ไม่ใช้ SSH)
+- **สลับโมเดล**: เลือก .gguf ที่มีอยู่ใน `~/models` ของ *ทั้งสองเครื่อง*
+  แล้วกดสลับ — master สั่งผ่าน control channel, worker restart
+  llama-server ของตัวเองแล้วรายงานผลกลับเข้า activity feed
+- master เปิด read-only status API ที่พอร์ต 5557 (`GET /api/cluster`,
+  `POST /api/model`)
+
 ### Telegram bot (แจ้งสถานะ Pi)
 
 ```bash

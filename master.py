@@ -10,17 +10,22 @@ Message flow:
   master -> client : JOB_RESULT (streamed), DONE (summary)
 """
 
+import collections
 import itertools
+import json
 import queue
 import socket
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from common import MASTER_PORT, HEARTBEAT_PORT, recv_json, send_json
 
 HEARTBEAT_TIMEOUT = 8.0  # seconds without a heartbeat -> worker assumed dead
 MAX_ATTEMPTS = 3         # a job is executed at most this many times
 IDLE_POLL = 0.1
+STATUS_PORT = 5557       # read-only cluster API (GET /api/cluster, POST /api/model)
+MODEL_NAME_RE = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gguf$")
 
 
 def log(msg):
@@ -58,6 +63,17 @@ class Worker:
         self.inflight = None
         self.last_seen = time.time()
         self.alive = True
+        self.mode = "?"
+        self.cpu = None
+        self.mem_mb = None
+        # telemetry refreshed by every heartbeat (see worker.telemetry())
+        self.temp_c = None
+        self.uptime_s = None
+        self.llama_ok = None
+        self.models = []
+        self.mem_avail_mb = None
+        self.current_model = None
+        self.last_model_result = None
 
 
 class ClientSession:
@@ -95,6 +111,11 @@ class Master:
         self.lock = threading.Lock()
         self.workers = {}  # name -> Worker
         self.pending = queue.Queue()
+        self.events = collections.deque(maxlen=100)
+
+    def event(self, kind, text):
+        self.events.append({"t": time.strftime("%H:%M:%S"),
+                            "kind": kind, "text": text})
 
     # ---- worker lifecycle --------------------------------------------
 
@@ -103,7 +124,9 @@ class Master:
             if name in self.workers:
                 name = f"{name}@{addr[1]}"
             w = Worker(name, conn, addr)
+            w.mode = "registering"
             self.workers[name] = w
+        self.event("worker", f"worker registered: {name} ({addr[0]})")
         log(f"worker registered: {name} ({addr[0]})")
         threading.Thread(target=self.handle_worker, args=(w,), daemon=True).start()
 
@@ -111,7 +134,16 @@ class Master:
         try:
             while True:
                 msg = recv_json(w.conn)
-                if msg.get("type") != "JOB_RESULT":
+                kind = msg.get("type")
+                if kind == "MODEL_RESULT":
+                    with self.lock:
+                        w.last_model_result = msg
+                    self.event("model",
+                               f"{w.name}: model switch -> {msg.get('model')} "
+                               f"({'ok' if msg.get('ok') else 'FAILED: ' + str(msg.get('error'))})")
+                    log(f"model result from {w.name}: {msg}")
+                    continue
+                if kind != "JOB_RESULT":
                     continue
                 job = w.inflight
                 w.inflight = None
@@ -122,6 +154,7 @@ class Master:
                 if msg.get("status") != "ok":
                     # inference failure counts against MAX_ATTEMPTS too
                     log(f"job {job.id} failed on {w.name}: {msg.get('error')}")
+                    self.event("job", f"job {job.id} failed on {w.name}")
                     self.requeue(job)
                     continue
                 msg["job_id"] = job.id
@@ -129,6 +162,8 @@ class Master:
                 msg["wall_ms"] = round((time.time() - job.started_at) * 1000, 1)
                 log(f"job {job.id} done on {w.name} "
                     f"({msg.get('predicted_per_second')} tok/s)")
+                self.event("job", f"job {job.id} done on {w.name} "
+                           f"({msg.get('predicted_per_second')} tok/s)")
                 job.client.deliver(msg)
         except (ConnectionError, OSError):
             self.mark_dead(w.name)
@@ -150,6 +185,8 @@ class Master:
             self.requeue(inflight)
         log(f"worker dead: {name}"
             + (f"; job {inflight.id} requeued" if inflight else ""))
+        self.event("worker", f"worker dead: {name}"
+                   + (f"; job {inflight.id} requeued" if inflight else ""))
 
     def requeue(self, job):
         job.attempts += 1
@@ -178,6 +215,7 @@ class Master:
             try:
                 send_json(w.conn, msg)
                 log(f"job {job.id} -> {w.name}")
+                self.event("job", f"job {job.id} -> {w.name}")
             except OSError:
                 self.mark_dead(w.name)
 
@@ -206,6 +244,11 @@ class Master:
                     w = self.workers.get(msg.get("name"))
                     if w is not None:
                         w.last_seen = time.time()
+                        for key in ("temp_c", "uptime_s", "llama_ok",
+                                    "models", "current_model",
+                                    "mem_avail_mb"):
+                            if key in msg:
+                                setattr(w, key, msg[key])
         except (ConnectionError, OSError):
             pass  # the control handler and monitor decide death
 
@@ -270,6 +313,95 @@ class Master:
         conn.close()
         log(f"client done: {n} job(s), wall {wall:.2f}s, "
             f"aggregate {done['aggregate_tok_s']} tok/s")
+        self.event("client", f"client done: {n} job(s), {wall:.2f}s, "
+                   f"{done['aggregate_tok_s']} tok/s")
+
+    # ---- management API (read-only status + model switching) -----------
+
+    def snapshot(self):
+        with self.lock:
+            workers = []
+            for w in self.workers.values():
+                workers.append({
+                    "name": w.name, "addr": w.addr[0], "alive": w.alive,
+                    "free": w.free, "inflight": (w.inflight.id
+                                                 if w.inflight else None),
+                    "mode": w.mode, "cpu": w.cpu, "mem_mb": w.mem_mb,
+                    "temp_c": w.temp_c, "uptime_s": w.uptime_s,
+                    "llama_ok": w.llama_ok, "models": list(w.models or []),
+                    "mem_avail_mb": w.mem_avail_mb,
+                    "current_model": w.current_model,
+                    "last_seen": w.last_seen,
+                    "last_model_result": w.last_model_result,
+                })
+            return {"workers": workers,
+                    "pending": self.pending.qsize(),
+                    "events": list(self.events)}
+
+    def broadcast_set_model(self, name):
+        """Ask every alive worker to switch its llama-server to `model`."""
+        if not MODEL_NAME_RE.match(name or ""):
+            return {"sent": [], "error": f"invalid model name: {name!r}"}
+        sent = []
+        with self.lock:
+            for w in self.workers.values():
+                if not w.alive:
+                    continue
+                try:
+                    send_json(w.conn, {"type": "SET_MODEL", "model": name})
+                    sent.append(w.name)
+                except OSError:
+                    pass
+        if sent:
+            self.event("model", f"model switch requested: {name} -> {sent}")
+        log(f"SET_MODEL {name} sent to {sent}")
+        return {"sent": sent}
+
+
+class StatusAPI:
+    """Tiny read-only HTTP API on the master (stdlib http.server)."""
+
+    def __init__(self, master):
+        self.master = master
+
+    def serve(self, host, port=STATUS_PORT):
+        master = self.master
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_a):
+                pass
+
+            def _json(self, code, obj):
+                body = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == "/api/cluster":
+                    self._json(200, master.snapshot())
+                else:
+                    self._json(404, {"error": "not found"})
+
+            def do_POST(self):
+                if self.path != "/api/model":
+                    self._json(404, {"error": "not found"})
+                    return
+                try:
+                    length = min(int(self.headers.get("Content-Length", 0)),
+                                 4096)
+                    payload = json.loads(self.rfile.read(length).decode())
+                    name = str(payload.get("model", ""))
+                except (ValueError, OSError):
+                    self._json(400, {"error": "bad request"})
+                    return
+                self._json(200, master.broadcast_set_model(name))
+
+        server = ThreadingHTTPServer((host, port), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -287,6 +419,7 @@ if __name__ == "__main__":
     threading.Thread(target=m.heartbeat_server, args=(args.bind,),
                      daemon=True).start()
     threading.Thread(target=m.monitor, daemon=True).start()
+    StatusAPI(m).serve(args.bind, STATUS_PORT)
     try:
         m.server(args.bind)
     except KeyboardInterrupt:
