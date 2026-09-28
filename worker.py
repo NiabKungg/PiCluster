@@ -201,22 +201,37 @@ class LlamaRunner:
                 "current_model": self.current_model}
 
     def run(self, job):
-        # Fixed-loopback URL with a validated int port; no external targets.
-        url = f"http://{LOOPBACK}:{self.port}/completion"
-        body = json.dumps({"prompt": job["prompt"],
-                           "n_predict": int(job.get("max_tokens", 128)),
-                           "temperature": float(job.get("temperature", 0.0)),
-                           "seed": int(job.get("seed", 42))}).encode()
-        status, resp = llama_request(self.port, "/completion",
-                                     payload=json.loads(body))
+        """Send the job through the model's CHAT template (the model is an
+        instruct model — raw /completion prompts produce nonsense), via the
+        OpenAI-compatible endpoint. Returns the reply plus timing stats."""
+        payload = {
+            "messages": [
+                {"role": "system",
+                 "content": "You are a helpful assistant running on a "
+                            "Raspberry Pi cluster. Answer concisely."},
+                {"role": "user", "content": str(job["prompt"])},
+            ],
+            "max_tokens": int(job.get("max_tokens", 128)),
+            "temperature": float(job.get("temperature", 0.7)),
+            "seed": int(job.get("seed", 42)),
+            "stream": False,
+        }
+        status, resp = llama_request(self.port, "/v1/chat/completions",
+                                     payload=payload)
         if status != 200:
             return {"status": "error", "error": f"llama-server HTTP {status}"}
         timing = resp.get("timings", {})
+        usage = resp.get("usage", {})
+        text = ""
+        choices = resp.get("choices") or []
+        if choices:
+            text = ((choices[0].get("message") or {}).get("content")) or ""
+        predicted = usage.get("completion_tokens")
         return {"status": "ok",
-                "tokens_predicted": resp.get("tokens_predicted"),
+                "tokens_predicted": predicted,
                 "predicted_per_second": timing.get("predicted_per_second"),
                 "prompt_per_second": timing.get("prompt_per_second"),
-                "output_text": (resp.get("content") or "")[:400]}
+                "output_text": text[:400]}
 
     def stop(self):
         if self.pid is not None:

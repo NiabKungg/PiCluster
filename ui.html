@@ -102,7 +102,7 @@
     <div class="params">
       <label>max_tokens <input id="p-tok" type="number" value="128" min="1" max="512"></label>
       <label>temperature <input id="p-temp" type="number" step="0.1" value="0.7" min="0" max="2"></label>
-      <label>seed <input id="p-seed" type="number" value="42"></label>
+      <label>seed (เว้นว่าง = สุ่ม) <input id="p-seed" type="number" placeholder="สุ่ม"></label>
     </div>
     <div id="msgs"></div>
     <div class="inputrow">
@@ -214,7 +214,8 @@ async function send() {
         prompt: text,
         max_tokens: +$("p-tok").value || 128,
         temperature: +$("p-temp").value || 0,
-        seed: +$("p-seed").value || 42
+        seed: $("p-seed").value === "" ? Math.floor(Math.random() * 1e9)
+                                       : +$("p-seed").value
       })
     });
     thinking.remove();
