@@ -137,10 +137,10 @@ class Master:
                 kind = msg.get("type")
                 if kind == "REGISTER":
                     # re-announce on a live socket: re-add after a drop
-                    # instead of staying a ghost until the next reconnect
+                    # instead of staying a ghost until the next reconnect.
+                    # must NOT touch free/inflight — a busy worker re-announces too
                     with self.lock:
                         w.last_seen = time.time()
-                        w.free = True
                         self.workers[w.name] = w
                     log(f"worker re-registered: {w.name}")
                     continue

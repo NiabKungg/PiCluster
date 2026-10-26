@@ -428,6 +428,7 @@ def main():
                     except Exception as exc:  # report failure instead of hanging
                         result = {"status": "error", "error": str(exc)}
                     result["type"] = "JOB_RESULT"
+                    result["job_id"] = msg["job_id"]
                     send_json(conn, result)
             except (ConnectionError, OSError) as exc:
                 log(f"connection lost ({exc}); reconnecting in 3s")
