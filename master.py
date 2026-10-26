@@ -135,6 +135,15 @@ class Master:
             while True:
                 msg = recv_json(w.conn)
                 kind = msg.get("type")
+                if kind == "REGISTER":
+                    # re-announce on a live socket: re-add after a drop
+                    # instead of staying a ghost until the next reconnect
+                    with self.lock:
+                        w.last_seen = time.time()
+                        w.free = True
+                        self.workers[w.name] = w
+                    log(f"worker re-registered: {w.name}")
+                    continue
                 if kind == "MODEL_RESULT":
                     with self.lock:
                         w.last_model_result = msg

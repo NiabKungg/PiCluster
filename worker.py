@@ -358,6 +358,24 @@ def main():
                      args=(stop, runner, state),
                      daemon=True).start()
 
+    def announce_loop():
+        # re-announce periodically: if the master dropped our entry
+        # (e.g. heartbeats lagged during boot) this re-adds us without
+        # tearing down the control connection
+        while not stop.is_set():
+            time.sleep(20.0)
+            conn = state["conn"]
+            if conn is None:
+                continue
+            try:
+                send_json(conn, {"type": "REGISTER", "name": args.name,
+                                 "mode": runner.mode, "cpu": os.cpu_count(),
+                                 "mem_mb": mem_total_mb()})
+            except OSError:
+                pass  # control loop reconnects and registers fresh
+
+    threading.Thread(target=announce_loop, daemon=True).start()
+
     try:
         while True:  # reconnect forever: a lost master must not retire this worker
             conn, used_addr = None, None

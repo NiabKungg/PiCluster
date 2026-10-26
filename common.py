@@ -5,14 +5,20 @@ Every message is 4-byte big-endian length prefix + UTF-8 JSON payload.
 
 import json
 import struct
+import threading
 
 MASTER_PORT = 5555   # worker registration, job dispatch, client requests
 HEARTBEAT_PORT = 5556  # worker heartbeats
 
+# one writer at a time per process: worker announces from a side thread,
+# master dispatches jobs while answering clients
+_send_lock = threading.Lock()
+
 
 def send_json(sock, obj):
     data = json.dumps(obj).encode("utf-8")
-    sock.sendall(struct.pack(">I", len(data)) + data)
+    with _send_lock:
+        sock.sendall(struct.pack(">I", len(data)) + data)
 
 
 def recv_exact(sock, n):
