@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 User=%i
 WorkingDirectory=/home/%i/pi-cluster
-ExecStart=/usr/bin/python3 /home/%i/pi-cluster/worker.py --master 10.0.0.1 --name %i --model qwen2.5-coder-0.5b-instruct-q4_k_m.gguf
+ExecStart=/usr/bin/python3 /home/%i/pi-cluster/worker.py --master 10.0.0.1,192.168.1.223 --name %i --model qwen2.5-coder-0.5b-instruct-q4_k_m.gguf
 Restart=always
 RestartSec=3
 

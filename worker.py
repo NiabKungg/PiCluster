@@ -285,18 +285,18 @@ def keepalive(sock):
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
 
-def heartbeat_loop(master, name, stop, runner, state):
+def heartbeat_loop(stop, runner, state):
     """Keeps a dedicated connection open and pings the master every 2s,
-    attaching fresh machine telemetry to every beat. If two consecutive
-    beats fail, the control socket is forcibly reset so the main loop
-    reconnects (recovers from half-open TCP after link flaps)."""
+    attaching fresh machine telemetry to every beat. Uses the currently
+    working master address so it follows LAN/WiFi failover."""
     failures = 0
     while not stop.is_set():
+        addr = state.get("master_addr") or state["addrs"][0]
         try:
-            s = socket.create_connection((master, HEARTBEAT_PORT), timeout=5)
+            s = socket.create_connection((addr, HEARTBEAT_PORT), timeout=5)
             failures = 0
             while not stop.is_set():
-                payload = {"type": "HEARTBEAT", "name": name}
+                payload = {"type": "HEARTBEAT", "name": state["name"]}
                 payload.update(runner.telemetry())
                 send_json(s, payload)
                 failures = 0
@@ -316,7 +316,9 @@ def heartbeat_loop(master, name, stop, runner, state):
 
 def main():
     ap = argparse.ArgumentParser(description="cluster worker")
-    ap.add_argument("--master", required=True, help="master IP or hostname")
+    ap.add_argument("--master", required=True,
+                    help="master IP/hostname; comma-separated list enables "
+                         "automatic LAN->WiFi failover (first reachable wins)")
     ap.add_argument("--name", default=socket.gethostname())
     ap.add_argument("--model",
                     help=".gguf filename inside ~/models (real mode); "
@@ -335,6 +337,9 @@ def main():
     ap.add_argument("--mock", action="store_true",
                     help="skip llama.cpp entirely and fake the work")
     args = ap.parse_args()
+    args.master_addrs = [a.strip() for a in args.master.split(",") if a.strip()]
+    if not args.master_addrs:
+        raise SystemExit("no master address given")
     globals()["_ARGS"] = args
 
     if args.mock:
@@ -347,24 +352,34 @@ def main():
     runner.start()
 
     stop = threading.Event()
-    state = {"conn": None}
+    state = {"conn": None, "addrs": args.master_addrs,
+             "name": args.name, "master_addr": args.master_addrs[0]}
     threading.Thread(target=heartbeat_loop,
-                     args=(args.master, args.name, stop, runner, state),
+                     args=(stop, runner, state),
                      daemon=True).start()
 
     try:
         while True:  # reconnect forever: a lost master must not retire this worker
-            conn = None
-            while conn is None:
-                try:
-                    conn = socket.create_connection((args.master, MASTER_PORT),
-                                                    timeout=5)
-                except OSError:
-                    log("waiting for master...")
-                    time.sleep(1.0)
+            conn, used_addr = None, None
+            while conn is None:  # try every master address in order (failover)
+                for addr in state["addrs"]:
+                    try:
+                        c = socket.create_connection((addr, MASTER_PORT),
+                                                     timeout=4)
+                        conn, used_addr = c, addr
+                        break
+                    except OSError:
+                        continue
+                if conn is None:
+                    log("waiting for master ("
+                        + ", ".join(state["addrs"]) + ")...")
+                    time.sleep(2.0)
             keepalive(conn)
             conn.settimeout(None)  # job waits can be long; block until they arrive
             state["conn"] = conn
+            state["master_addr"] = used_addr
+            if used_addr != state["addrs"][0]:
+                log(f"using master at {used_addr} (failover path)")
             try:
                 send_json(conn, {"type": "REGISTER", "name": args.name,
                                  "mode": runner.mode, "cpu": os.cpu_count(),
